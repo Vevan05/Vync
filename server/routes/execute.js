@@ -74,16 +74,7 @@ router.post("/", async (req, res) => {
     `sh -c "${config.cmd}"`,
     ].join(" ");
 
-
-    console.log("tmpDir:", tmpDir);
-    console.log("tmpFile:", tmpFile);
-    console.log("dockerCmd:", dockerCmd);
-    console.log("file contents:", fs.readFileSync(tmpFile, "utf8"));
-
     exec(dockerCmd, { timeout: 60000 }, (error, stdout, stderr) => {
-       console.log("stdout:", stdout);
-       console.log("stderr:", stderr);
-       console.log("error:", error); 
 
       // Clean up temp files
       fs.rmSync(tmpDir, { recursive: true, force: true });
