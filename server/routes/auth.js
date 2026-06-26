@@ -16,10 +16,10 @@ router.post("/signup", async (req, res) => {
     return res.status(400).json({ error: "All fields required" });
 
   if(username.length > 16) 
-    return res.status(400).json({error: "Username too long (should be between 3 and 16 characters)"});
+    return res.status(400).json({error: "Username should be 3-16 characters"});
 
   if(username.length < 3)
-    return res.status(400).json({error: "Username too short (should be between 3 and 16 characters)"});
+    return res.status(400).json({error: "Username should be 3-16 characters"});
 
   if (!emailRegex.test(email))
     return res.status(400).json({ error: "Invalid email format" });
