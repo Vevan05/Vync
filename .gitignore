@@ -1,0 +1,16 @@
+# Dependencies
+client/node_modules/
+server/node_modules/
+
+**/.env
+
+client/dist/
+client/build/
+
+*.log
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+
+/tmp/vync-*
