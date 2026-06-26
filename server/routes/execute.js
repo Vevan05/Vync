@@ -66,7 +66,7 @@ router.post("/", async (req, res) => {
     const dockerCmd = [
     "docker run --rm",
     "--network=none",
-    language === "go" ? "--memory=512m" : "--memory=128m",  // Go needs more RAM to compile
+    language === "go" ? "--memory=512m" : "--memory=128m",  
     "--cpus=0.5",
     `-v ${tmpDir}:/code`,
     "-w /code",
