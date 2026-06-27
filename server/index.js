@@ -22,29 +22,34 @@ const io = new Server(server, {
 });
 
 // Security middleware first
-app.use(helmet());
+/*app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+}));*/
 app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173" }));
 app.use(express.json({ limit: "50kb" }));
 
-// General rate limit — 100 requests per 15 minutes per IP
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: "Too many requests, slow down" },
-});
-app.use(limiter);
+if (process.env.NODE_ENV === "production") {
+  const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { error: "Too many requests, slow down" },
+  });
+  app.use(limiter);
 
-// Stricter limit for code execution — 10 runs per minute per IP
-const executeLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  message: { error: "Too many execution requests" },
-});
+  const executeLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    message: { error: "Too many execution requests" },
+  });
+  app.use("/api/execute", executeLimiter, executeRoute);
+} else {
+  app.use("/api/execute", executeRoute);
+}
 
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/files", fileRoutes);
-app.use("/api/execute", executeLimiter, executeRoute);
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 // Yjs docs live in memory
@@ -125,6 +130,12 @@ io.on("connection", (socket) => {
       }
     }
   });
+});
+
+// Global error handler — catches any unhandled errors and logs them
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err.stack);
+  res.status(500).json({ error: "Internal server error" });
 });
 
 const PORT = process.env.PORT || 3001;
