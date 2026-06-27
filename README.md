@@ -8,6 +8,8 @@ Vync is a full-stack collaborative code editor where multiple users can write co
 
 ---
 
+![Demo GIF](demo.gif)
+
 ## Features
 
 - **Real-time collaboration** — multiple users edit the same file simultaneously with no conflicts
@@ -19,7 +21,6 @@ Vync is a full-stack collaborative code editor where multiple users can write co
 - **Auto-save** — files save to the database automatically after every edit
 - **Room sharing** — share a room URL with anyone to start collaborating instantly
 
----
 
 ## Tech Stack
 
@@ -34,7 +35,6 @@ Vync is a full-stack collaborative code editor where multiple users can write co
 | Execution | Docker | Isolated sandboxed code execution |
 | Auth | JWT, bcrypt | Secure authentication |
 
----
 
 ## CS Concepts Demonstrated
 
@@ -62,7 +62,6 @@ Vync is a full-stack collaborative code editor where multiple users can write co
 - Docker containers run with `--network=none` — user code cannot make outbound network requests
 - Temp files are created in isolated directories and deleted immediately after execution
 
----
 
 ## Architecture
 
@@ -84,7 +83,6 @@ Node.js + Express Server
                           (Python, JS, TS, Java, C++, Go)
 ```
 
----
 
 ## Getting Started
 
@@ -147,7 +145,6 @@ npm run dev
 
 Open **http://localhost:5173**
 
----
 
 ## How It Works
 
@@ -170,7 +167,6 @@ When a user clicks Run:
 
 Snapshots are saved to PostgreSQL with a label and timestamp. Restoring a snapshot applies the content directly to the Yjs document, so all users in the room see the restore in real time.
 
----
 
 ## Project Structure
 
@@ -201,7 +197,6 @@ vync/
             └── AuthContext.jsx
 ```
 
----
 
 ## Supported Languages
 
@@ -214,7 +209,6 @@ vync/
 | C++ | GCC | Compiled with g++ |
 | Go | Go 1.21 (custom image) | stdlib cache pre-warmed |
 
----
 
 ## License
 
