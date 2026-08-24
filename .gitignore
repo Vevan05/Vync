@@ -14,3 +14,5 @@ npm-debug.log*
 Thumbs.db
 
 /tmp/vync-*
+
+.claude/
