@@ -1,10 +1,10 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { useAuth } from "../context/AuthContext";
 
 const LANGUAGES = ["javascript", "python", "typescript", "cpp", "java", "go"];
-const EXTENSIONS = {javascript: "index.js", python: "main.py", 
+const EXTENSIONS = {javascript: "index.js", python: "main.py",
                     typescript: "index.ts",  cpp: "main.cpp",
                     java: "Main.java",go: "main.go",};
 
@@ -16,7 +16,10 @@ export default function Dashboard() {
   const [newFileLang, setNewFileLang] = useState("javascript");
   const [joinRoomId, setJoinRoomId] = useState("");
 
-  const api = axios.create({ headers: { Authorization: `Bearer ${token}` } });
+  const api = useMemo(
+    () => axios.create({ headers: { Authorization: `Bearer ${token}` } }),
+    [token]
+  );
 
   useEffect(() => { fetchFiles(); }, []);
 

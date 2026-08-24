@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import MonacoEditor from "@monaco-editor/react";
 import * as Y from "yjs";
@@ -9,6 +9,28 @@ import { useAuth } from "../context/AuthContext";
 const EXT = {"javascript": "js", "python": "py", "go": "go", "cpp": "cpp", "typescript": "ts", "java": "java"};
 
 const SOCKET_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3001";
+
+// Throttle helper for high-frequency events like cursor moves.
+function throttle(fn, ms) {
+  let last = 0;
+  let timer = null;
+  let lastArgs = null;
+  return function throttled(...args) {
+    const now = Date.now();
+    const remaining = ms - (now - last);
+    lastArgs = args;
+    if (remaining <= 0) {
+      last = now;
+      fn(...args);
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        last = Date.now();
+        timer = null;
+        fn(...lastArgs);
+      }, remaining);
+    }
+  };
+}
 
 export default function Editor() {
   const { roomId } = useParams();
@@ -27,12 +49,14 @@ export default function Editor() {
   const editorRef = useRef(null);
   const monacoRef = useRef(null);
   const isRemoteUpdate = useRef(false);
+  const isApplyingRemote = useRef(false);
   const saveTimer = useRef(null);
   const outputRef = useRef(null);
   const decorationsRef = useRef({});
-  const userColorsRef = useRef({}); 
+  const userColorsRef = useRef({});
+  const docSeededRef = useRef(false);
 
-  const [output, setOutput] = useState(null);   
+  const [output, setOutput] = useState(null);
   const [running, setRunning] = useState(false);
   const [showOutput, setShowOutput] = useState(false);
   const [showWarning, setShowWarning] = useState(() => localStorage.getItem("vync_ts_warning_dismissed") !== "true");
@@ -44,10 +68,15 @@ export default function Editor() {
   const [snapshots, setSnapshots] = useState([]);
   const [snapshotLabel, setSnapshotLabel] = useState("");
 
-  const api = axios.create({ headers: { Authorization: `Bearer ${token}` } });
+  // Memoize the axios instance so it isn't rebuilt on every render.
+  const api = useMemo(
+    () => axios.create({ headers: { Authorization: `Bearer ${token}` } }),
+    [token]
+  );
 
   // Inject base cursor CSS once
   useEffect(() => {
+    if (document.getElementById("vync-cursor-styles")) return;
     const style = document.createElement("style");
     style.id = "vync-cursor-styles";
     style.textContent = `
@@ -60,97 +89,120 @@ export default function Editor() {
         pointer-events: none;
       }
     `;
-    if (!document.getElementById("vync-cursor-styles")) {
-      document.head.appendChild(style);
-    }
+    document.head.appendChild(style);
     return () => document.getElementById("vync-cursor-styles")?.remove();
   }, []);
 
   useEffect(() => {
-  if (showHistory) fetchSnapshots();
-}, [showHistory]);
+    if (showHistory) fetchSnapshots();
+  }, [showHistory]);
 
-  // Track whether server has already given us the doc state
-const docSeededRef = useRef(false);
+  // Load file metadata from DB.
+  useEffect(() => {
+    let cancelled = false;
+    api.get(`/api/files/${roomId}`)
+      .then(({ data }) => {
+        if (cancelled) return;
+        setLanguage(data.language);
+        setFileName(data.name);
+        const ytext = ydocRef.current.getText("content");
+        ytextRef.current = ytext;
+        // Only seed from DB if the server hasn't given us content yet.
+        if (!docSeededRef.current && data.content && ytext.toString() === "") {
+          ytext.insert(0, data.content);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        if (err.response?.status === 404) {
+          setRoomError("This room doesn't exist. Check the ID and try again.");
+        } else {
+          setRoomError("Something went wrong loading this room.");
+        }
+      });
+    return () => { cancelled = true; };
+  }, [roomId, api]);
 
-// Load file from DB
-useEffect(() => {
-  api.get(`/api/files/${roomId}`)
-    .then(({ data }) => {
-      setLanguage(data.language);
-      setFileName(data.name);
-      const ytext = ydocRef.current.getText("content");
-      ytextRef.current = ytext;
+  // WebSocket connection
+  useEffect(() => {
+    const socket = io(SOCKET_URL, {
+      auth: { token },
+      // Reconnection is on by default; the server's disconnect handler will
+      // clean up the user's presence entry automatically.
+    });
+    socketRef.current = socket;
 
-      // ✅ Only seed from DB if server hasn't sent us content yet
-      if (!docSeededRef.current && data.content && ytext.toString() === "") {
-        ytext.insert(0, data.content);
-      }
-    })
-     .catch((err) => {
-      // ✅ 404 means room doesn't exist, anything else is a server error
-      if (err.response?.status === 404) {
-        setRoomError("This room doesn't exist. Check the ID and try again.");
-      } else {
-        setRoomError("Something went wrong loading this room.");
-      }
-     })
-}, [roomId]);
+    const ytext = ydocRef.current.getText("content");
+    ytextRef.current = ytext;
 
-// WebSocket connection
-useEffect(() => {
-  const socket = io(SOCKET_URL);
-  socketRef.current = socket;
+    socket.on("connect", () => {
+      socket.emit("join-room", { roomId, username: user?.username });
+    });
 
-  const ytext = ydocRef.current.getText("content");
-  ytextRef.current = ytext;
+    socket.on("connect_error", (err) => {
+      setRoomError(err.message || "Failed to connect. Please log in again.");
+    });
 
-  socket.on("connect", () => {
-    socket.emit("join-room", { roomId, username: user?.username });
-  });
+    socket.on("room-error", (msg) => {
+      setRoomError(msg || "You don't have access to this room.");
+      socket.disconnect();
+    });
 
-  socket.on("doc-state", (update) => {
-    // ✅ Mark that the server has given us the authoritative state
-    docSeededRef.current = true;
-
-    isRemoteUpdate.current = true;
-    Y.applyUpdate(ydocRef.current, new Uint8Array(update));
-    isRemoteUpdate.current = false;
-
-    const content = ytextRef.current?.toString();
-    if (editorRef.current && content) {
-      editorRef.current.setValue(content);
-    }
-  });
-
-    // Incremental updates from other users
-    socket.on("doc-update", (update) => {
+    socket.on("doc-state", (update) => {
+      // First sync from the server — this is authoritative.
+      docSeededRef.current = true;
       isRemoteUpdate.current = true;
-      const prevContent = ytext.toString();
-      Y.applyUpdate(ydocRef.current, new Uint8Array(update));
-      isRemoteUpdate.current = false;
+      isApplyingRemote.current = true;
+      try {
+        Y.applyUpdate(ydocRef.current, new Uint8Array(update));
+        // Sync Monaco to the merged state if it has drifted.
+        const content = ytext.toString();
+        if (editorRef.current && content !== editorRef.current.getValue()) {
+          editorRef.current.setValue(content);
+        }
+      } finally {
+        isRemoteUpdate.current = false;
+        isApplyingRemote.current = false;
+      }
+    });
 
-      const newContent = ytext.toString();
-      if (editorRef.current && newContent !== prevContent) {
-        const position = editorRef.current.getPosition();
-        editorRef.current.getModel().setValue(newContent);
-        if (position) editorRef.current.setPosition(position);
+    // Incremental updates from other users.
+    socket.on("doc-update", (update) => {
+      const u8 = update instanceof Uint8Array ? update : new Uint8Array(update);
+      isRemoteUpdate.current = true;
+      isApplyingRemote.current = true;
+      try {
+        Y.applyUpdate(ydocRef.current, u8);
+        // Push the merged Yjs state back into Monaco using execEdits so the
+        // cursor position is preserved and the undo stack stays intact.
+        const editor = editorRef.current;
+        if (editor) {
+          const model = editor.getModel();
+          const currentValue = model.getValue();
+          const newValue = ytext.toString();
+          if (currentValue !== newValue) {
+            const fullRange = model.getFullModelRange();
+            editor.executeEdits("remote", [
+              { range: fullRange, text: newValue, forceMoveMarkers: true },
+            ]);
+          }
+        }
+      } finally {
+        isRemoteUpdate.current = false;
+        isApplyingRemote.current = false;
       }
     });
 
     socket.on("users-update", (userList) => setUsers(userList));
 
-    // Receive another user's cursor
     socket.on("cursor-update", ({ socketId, user: remoteUser, cursor }) => {
       if (!editorRef.current || !monacoRef.current || !cursor) return;
-
       const monaco = monacoRef.current;
       const editor = editorRef.current;
       const color = remoteUser?.color || "#ffffff";
 
       userColorsRef.current[socketId] = color;
 
-      // Inject a per-user color style
       let perUserStyle = document.getElementById(`cursor-style-${socketId}`);
       if (!perUserStyle) {
         perUserStyle = document.createElement("style");
@@ -162,7 +214,7 @@ useEffect(() => {
           border-left: 2px solid ${color};
         }
         .cursor-label-${socketId}::after {
-          content: "${remoteUser?.name || "user"}";
+          content: "${(remoteUser?.name || "user").replace(/"/g, '\\"')}";
           background: ${color};
           color: #000;
           font-size: 11px;
@@ -172,7 +224,6 @@ useEffect(() => {
         }
       `;
 
-      // Draw the decoration at their cursor position
       const newDecorations = [
         {
           range: new monaco.Range(
@@ -187,12 +238,10 @@ useEffect(() => {
         },
       ];
 
-      // Replace old decorations for this user with new ones
       const oldIds = decorationsRef.current[socketId] || [];
       decorationsRef.current[socketId] = editor.deltaDecorations(oldIds, newDecorations);
     });
 
-    // Clean up when a user leaves
     socket.on("user-left", (socketId) => {
       if (editorRef.current && decorationsRef.current[socketId]) {
         editorRef.current.deltaDecorations(decorationsRef.current[socketId], []);
@@ -201,25 +250,30 @@ useEffect(() => {
       document.getElementById(`cursor-style-${socketId}`)?.remove();
     });
 
-    return () => socket.disconnect();
-  }, [roomId, user]);
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [roomId, user, token]);
 
-  // Broadcast local Yjs changes
+  // Broadcast local Yjs changes — only the *delta* update, not the full state.
   useEffect(() => {
     const ytext = ytextRef.current;
     if (!ytext) return;
 
     const handler = (event, transaction) => {
       if (isRemoteUpdate.current || transaction.local === false) return;
-      const update = Y.encodeStateAsUpdate(ydocRef.current);
-      socketRef.current?.emit("doc-update", { roomId, update: Array.from(update) });
+      // The Yjs update passed to the observer is the incremental diff.
+      const update = transaction.update;
+      if (update && update.length) {
+        socketRef.current?.emit("doc-update", { roomId, update });
+      }
     };
 
     ytext.observe(handler);
     return () => ytext.unobserve(handler);
   }, [roomId]);
 
-  // onMount now takes monaco too, and sets up cursor tracking
   function handleEditorMount(editor, monaco) {
     editorRef.current = editor;
     monacoRef.current = monaco;
@@ -227,16 +281,15 @@ useEffect(() => {
     const ytext = ytextRef.current;
     if (ytext && ytext.toString()) editor.setValue(ytext.toString());
 
-    // Emit cursor position on every move
-    editor.onDidChangeCursorPosition((e) => {
+    // Throttle cursor emissions — they fire on every selection change.
+    const emitCursor = throttle((pos) => {
       socketRef.current?.emit("cursor-update", {
         roomId,
-        cursor: {
-          lineNumber: e.position.lineNumber,
-          column: e.position.column,
-        },
+        cursor: { lineNumber: pos.lineNumber, column: pos.column },
       });
-    });
+    }, 33);
+
+    editor.onDidChangeCursorPosition((e) => emitCursor(e.position));
   }
 
   function handleEditorChange(value) {
@@ -249,12 +302,19 @@ useEffect(() => {
       ytext.insert(0, value || "");
     });
 
+    // "Unsaved" while the debounce is pending; "Saving..." while the request is in flight.
     setSaveStatus("unsaved");
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveFile(value), 1500);
+    saveTimer.current = setTimeout(() => {
+      // Read the current editor value at fire time, not the value captured
+      // when the timer was scheduled.
+      const current = editorRef.current?.getValue() ?? "";
+      saveFile(current);
+    }, 1500);
   }
 
   async function saveFile(content) {
+    setSaveStatus("saving");
     try {
       await api.put(`/api/files/${roomId}`, { content });
       setSaveStatus("saved");
@@ -270,19 +330,21 @@ useEffect(() => {
     try {
       await api.post(`/api/files/${roomId}/snapshots`, { content, label });
       setSnapshotLabel("");
-      fetchSnapshots(); // refresh the list
+      fetchSnapshots();
       alert("Snapshot saved!");
     } catch {
       alert("Failed to save snapshot");
     }
   }
 
-async function fetchSnapshots() {
-  try {
-    const { data } = await api.get(`/api/files/${roomId}/snapshots`);
-    setSnapshots(data);
-  } catch {}
-}
+  async function fetchSnapshots() {
+    try {
+      const { data } = await api.get(`/api/files/${roomId}/snapshots`);
+      setSnapshots(data);
+    } catch (err) {
+      console.error("fetchSnapshots failed:", err);
+    }
+  }
 
   async function restoreSnapshot(snapshotId) {
     if (!confirm("Restore this snapshot? Current content will be replaced.")) return;
@@ -305,14 +367,13 @@ async function fetchSnapshots() {
     setRunning(true);
     setShowOutput(true);
     setOutput(null);
-
-      setTimeout(() => {outputRef.current?.scrollIntoView({ behavior: "smooth" })}, 50);
+    setTimeout(() => outputRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
 
     try {
       const { data } = await api.post("/api/execute", { code, language });
       setOutput(data);
-    } catch {
-      setOutput({ output: "", error: "Server error — is Docker running?" });
+    } catch (err) {
+      setOutput({ output: "", error: err.response?.data?.error || "Server error — is Docker running?" });
     } finally {
       setRunning(false);
     }
@@ -320,9 +381,8 @@ async function fetchSnapshots() {
 
   function copyRoomLink() {
     navigator.clipboard.writeText(window.location.href);
-
     setCopied(true);
-    setTimeout(()=> setCopied(false), 10000);
+    setTimeout(() => setCopied(false), 10000);
   }
 
   function dismissTsWarning() {
@@ -367,6 +427,12 @@ async function fetchSnapshots() {
     );
   }
 
+  const saveLabel =
+    saveStatus === "saved" ? "✓ Saved" :
+    saveStatus === "saving" ? "Saving..." :
+    saveStatus === "unsaved" ? "● Unsaved" :
+    "Save failed";
+
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
       {/* Toolbar */}
@@ -374,13 +440,10 @@ async function fetchSnapshots() {
         height: 48, background: "#161b22", borderBottom: "1px solid #30363d",
         display: "flex", alignItems: "center", padding: "0 16px", gap: 12,
       }}>
-
-        <Link to = "/"> 
-        <button className="ghost"
-              style={{ fontSize: 11, padding: "2px 8px" }}
-        >
-        &lt; 
-        </button>
+        <Link to="/">
+          <button className="ghost" style={{ fontSize: 11, padding: "2px 8px" }}>
+            &lt;
+          </button>
         </Link>
         <button
           className="primary"
@@ -409,20 +472,28 @@ async function fetchSnapshots() {
 
         {/* Colored avatar bubbles */}
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          {users.map((u, i) => (
-            <div key={i} title={u.name} style={{
-              width: 28, height: 28, borderRadius: "50%",
-              background: u.color, display: "flex", alignItems: "center",
-              justifyContent: "center", fontSize: 12, fontWeight: 600,
-              color: "#000", border: "2px solid #30363d",
-            }}>
-              {u.name[0].toUpperCase()}
-            </div>
-          ))}
+          {users.map((u, i) => {
+            const initial = (u.name || "?").trim()[0]?.toUpperCase() || "?";
+            return (
+              <div key={i} title={u.name} style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: u.color, display: "flex", alignItems: "center",
+                justifyContent: "center", fontSize: 12, fontWeight: 600,
+                color: "#000", border: "2px solid #30363d",
+              }}>
+                {initial}
+              </div>
+            );
+          })}
         </div>
 
-        <span style={{ fontSize: 12, color: saveStatus === "saved" ? "#3fb950" : "#f85149" }}>
-          {saveStatus === "saved" ? "✓ Saved" : saveStatus === "unsaved" ? "Saving..." : "Save failed"}
+        <span style={{
+          fontSize: 12,
+          color: saveStatus === "saved" ? "#3fb950"
+               : saveStatus === "error" ? "#f85149"
+               : "#e3b341",
+        }}>
+          {saveLabel}
         </span>
 
         <button className="ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={copyRoomLink}>
@@ -456,7 +527,7 @@ async function fetchSnapshots() {
           }}
         />
       </div>
-        
+
       {language === "typescript" && showWarning && (
         <div style={{
           background: "#2d2a00", borderTop: "1px solid #6e5c00",
@@ -482,7 +553,6 @@ async function fetchSnapshots() {
           flexDirection: "column",
           flexShrink: 0,
         }}>
-          {/* ✅ Drag handle */}
           <div
             onMouseDown={startResize}
             style={{
@@ -496,7 +566,6 @@ async function fetchSnapshots() {
             onMouseLeave={e => e.target.style.background = "#30363d"}
           />
 
-          {/* Toolbar */}
           <div style={{
             display: "flex", justifyContent: "space-between", alignItems: "center",
             padding: "6px 16px", borderBottom: "1px solid #30363d",
@@ -509,7 +578,6 @@ async function fetchSnapshots() {
             >✕</button>
           </div>
 
-          {/* Output content */}
           <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
             {running && <p style={{ color: "#7d8590", fontSize: 13 }}>Running...</p>}
             {output && (
